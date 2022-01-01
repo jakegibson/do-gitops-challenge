@@ -9,7 +9,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 )
 
-var domain = "do-challenge.fulldeploy.dev"
+var domain = "*.fulldeploy.dev"
 
 func main() {
 	pulumi.Run(func(ctx *pulumi.Context) error {
@@ -22,18 +22,15 @@ func main() {
 		if err != nil {
 			return err
 		}
-		// err = deployLinkered(ctx)
-		// if err != nil {
-		// 	return err
-		// }
+
 		err = deployArgoCD(ctx)
 		if err != nil {
 			return err
 		}
-		// err = deployTekton(ctx)
-		// if err != nil {
-		// 	return err
-		// }
+		err = deployTekton(ctx)
+		if err != nil {
+			return err
+		}
 
 		ctx.Export("certificateName", cert.Name)
 		ctx.Export("certificateID", cert.ID())
@@ -49,6 +46,7 @@ func createCert(ctx *pulumi.Context) (Cert *digitalocean.Certificate, Error erro
 		Domains: pulumi.StringArray{
 			pulumi.String(domain),
 		},
+		Name: pulumi.String("do-challenge"),
 		Type: pulumi.String("lets_encrypt"),
 	})
 	if err != nil {
@@ -72,10 +70,22 @@ func deployTraefik(ctx *pulumi.Context, certId pulumi.StringOutput) error {
 	values := pulumi.Map{
 		"service": pulumi.Map{
 			"annotations": pulumi.StringMap{
+				"service.beta.kubernetes.io/do-loadbalancer-healthcheck-port":       pulumi.String("80"),
+				"service.beta.kubernetes.io/do-loadbalancer-healthcheck-protocol":   pulumi.String("http"),
+				"service.beta.kubernetes.io/do-loadbalancer-healthcheck-path":       pulumi.String("/ping"),
 				"service.beta.kubernetes.io/do-loadbalancer-certificate-id":         certId,
 				"service.beta.kubernetes.io/do-loadbalancer-protocol":               pulumi.String("https"),
 				"service.beta.kubernetes.io/do-loadbalancer-hostname":               pulumi.String(domain),
 				"service.beta.kubernetes.io/do-loadbalancer-redirect-http-to-https": pulumi.String("true"),
+			},
+		},
+		"logs": pulumi.Map{
+
+			"general": pulumi.StringMap{
+				"level": pulumi.String("INFO"),
+			},
+			"access": pulumi.StringMap{
+				"enabled": pulumi.String("true"),
 			},
 		},
 	}
@@ -88,6 +98,7 @@ func deployTraefik(ctx *pulumi.Context, certId pulumi.StringOutput) error {
 		Namespace: pulumi.String("networking"),
 		Values:    values,
 		Version:   pulumi.String("10.7.1"),
+		SkipAwait: pulumi.Bool(true),
 	})
 
 	if err != nil {
@@ -98,26 +109,26 @@ func deployTraefik(ctx *pulumi.Context, certId pulumi.StringOutput) error {
 }
 
 // Deploy Linkered
-func deployLinkered(ctx *pulumi.Context) error {
-	values := pulumi.Map{
-		"clusterDomain":    pulumi.String(domain),
-		"installNamespace": pulumi.Bool(false),
-	}
-	_, err := helm.NewChart(ctx, "linkered", helm.ChartArgs{
-		Chart: pulumi.String("linkered"),
+// func deployLinkered(ctx *pulumi.Context) error {
+// 	values := pulumi.Map{
+// 		"clusterDomain":    pulumi.String(domain),
+// 		"installNamespace": pulumi.Bool(false),
+// 	}
+// 	_, err := helm.NewChart(ctx, "linkered", helm.ChartArgs{
+// 		Chart: pulumi.String("linkered"),
 
-		FetchArgs: helm.FetchArgs{
-			Repo: pulumi.String("https://helm.linkerd.io/stable"),
-		},
-		Namespace: pulumi.String("networking"),
-		Version:   pulumi.String("2.11.1"),
-		Values:    values,
-	})
-	if err != nil {
-		return err
-	}
-	return nil
-}
+// 		FetchArgs: helm.FetchArgs{
+// 			Repo: pulumi.String("https://helm.linkerd.io/stable"),
+// 		},
+// 		Namespace: pulumi.String("networking"),
+// 		Version:   pulumi.String("2.11.1"),
+// 		Values:    values,
+// 	})
+// 	if err != nil {
+// 		return err
+// 	}
+// 	return nil
+// }
 
 // Deploy ArgoCD
 func deployArgoCD(ctx *pulumi.Context) error {
@@ -142,7 +153,15 @@ func deployArgoCD(ctx *pulumi.Context) error {
 	if err != nil {
 		return err
 	}
-
+	// ingress for dashboard exposed with traefik
+	_, err = yaml.NewConfigFile(ctx, "argocd-ingress",
+		&yaml.ConfigFileArgs{
+			File: "argocd/ingress-route.yaml",
+		},
+	)
+	if err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -162,6 +181,18 @@ func deployTekton(ctx *pulumi.Context) error {
 	_, err = yaml.NewConfigFile(ctx, "configmap-pv",
 		&yaml.ConfigFileArgs{
 			File: "tekton/configmap.yaml",
+		},
+	)
+
+	if err != nil {
+		return err
+	}
+
+	// ingress for dashboard exposed with traefik
+	_, err = yaml.NewConfigFile(ctx, "tekton-ingress",
+		&yaml.ConfigFileArgs{
+			File:      "tekton/ingress.yaml",
+			SkipAwait: true,
 		},
 	)
 	if err != nil {
